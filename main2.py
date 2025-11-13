@@ -39,14 +39,13 @@ SELECTION_OUTLINE = "#4A90E2"
 
 def extract_class_info(class_string):
     try:
-        # Split by underscore
         parts = class_string.strip().split("_")
 
         if len(parts) < 4:
             return {"bimester": "Unknown", "branch": "Unknown", "course": "Unknown", "schedule": "Unknown"}
 
         bimester_raw = parts[0]
-        bimester = bimester_raw[-2:]  # e.g., 254A -> 4A
+        bimester = bimester_raw[-2:]
         branch = parts[1]
         course = parts[2]
         schedule = parts[3]
@@ -105,12 +104,10 @@ def infer_course_suffix(class_string):
     if not class_string:
         return None
 
-    # Try to find the SPS course pattern directly in the provided string.
     direct_match = re.search(r"SPS\s*\d\s*-\s*([123])\b", class_string)
     if direct_match:
         return direct_match.group(1)
 
-    # Fall back to extracting the structured course portion if underscores are present.
     details = extract_class_info(class_string)
     course_label = details.get("course", "")
     if course_label:
@@ -129,13 +126,21 @@ def derive_course_name(df):
         return ""
     return str(class_series.iloc[0]).strip()
 
-def style_assignment_table(df):
-    """Return a pandas Styler configured with the academic table design.
 
-    The styling complies with the requested palette, typography, alternating
-    rows, hover colour, and subtle skill-based accent lines while keeping the
-    table printer-friendly and compatible with downstream exports.
-    """
+def extract_course_tail(class_string):
+    if not class_string:
+        return "Unknown"
+    text = str(class_string).strip()
+    match = re.search(r"SPS\s*\d\s*-\s*\d", text)
+    if match:
+        tail = text[match.end():].lstrip(" _")
+        if tail:
+            return tail
+    if "_" in text:
+        return text.split("_")[-1].strip() or "Unknown"
+    return text or "Unknown"
+
+def style_assignment_table(df):
     base_font = '"Inter", "Lato", "Segoe UI", sans-serif'
     accent_map = {**HEADER_COLOR_MAP, "Total": "#D18DF0"}
 
@@ -244,7 +249,8 @@ def process_assignment(file_path_or_df, selected_units, skip_read=False):
     df[['Earned', 'Total']] = df['Result (DateSubmitted)'].apply(lambda x: pd.Series(extract_score(x)))
     all_students = sorted(df['Student'].unique())
     skills = ['Listening', 'Grammar', 'Vocabulary', 'Reading']
-    course = df['Class'].iloc[0].strip() if 'Class' in df.columns else "Unknown"
+    course_source = df['Class'].iloc[0].strip() if 'Class' in df.columns else ""
+    course = extract_course_tail(course_source)
 
     df_filtered = df[df['Unit'].isin(selected_units)].copy()
     grouped = df_filtered.groupby(['Student', 'Content']).agg({'Earned': 'sum', 'Total': 'sum'}).reset_index()
@@ -313,7 +319,8 @@ def process_test(file_path_or_df, selected_units, skip_read=False):
     df['Score'] = df['Result (DateSubmitted)'].apply(lambda x: extract_score(x)[0])
     df_all = df[['Student', 'Score', 'Unit', 'Class']]
 
-    course = df['Class'].dropna().astype(str).str.strip().iloc[0] if 'Class' in df.columns and not df['Class'].dropna().empty else "Unknown"
+    raw_course = df['Class'].dropna().astype(str).str.strip().iloc[0] if 'Class' in df.columns and not df['Class'].dropna().empty else ""
+    course = extract_course_tail(raw_course)
 
     all_students = sorted(df_all['Student'].unique())
     selected_units_sorted = sorted(selected_units, key=natural_unit_sort_key)
@@ -352,21 +359,21 @@ def try_configure_roboto(pdf: FPDF) -> str:
     return "Arial"
 
 
-def export_pdf(df, path, teacher, course, selected_units_label):
+def export_pdf(df, path, teacher, course_display, class_string, selected_units_label):
     pdf = FPDF(orientation='L')
     pdf.add_page()
     font_family = try_configure_roboto(pdf)
     pdf.set_font(font_family, style='B', size=12)
-    class_info = extract_class_info(course)
+    class_info = extract_class_info(class_string or course_display)
 
     left_labels = ["Teacher:", "Course:", "Bimester:"]
-    left_values = [teacher, course, class_info["bimester"]]
+    left_values = [teacher, course_display, class_info["bimester"]]
     right_labels = ["Branch:", "Schedule:", "Units:"]
     right_values = [class_info["branch"], class_info["schedule"], selected_units_label]
 
     label_width = 30
     value_width = 80
-    gap = 36  # space between the two columns
+    gap = 36
 
     for i in range(3):
         pdf.set_font(font_family, style='B', size=11)
@@ -477,7 +484,7 @@ class ReportApp:
         self.course_hint = ""
         self.quick_selection_var = tk.StringVar(value="eval1")
         self.quick_buttons = []
-        self.advanced_enabled = tk.BooleanVar(value=False)
+        self.selection_mode = tk.StringVar(value="quick")
         self.unit_vars = {}
         self.unit_checkbuttons = {}
         self.current_units_label = ""
@@ -490,44 +497,52 @@ class ReportApp:
         top_frame = tk.Frame(root, bg="#F7F9FC")
         top_frame.pack(pady=6, fill="x")
 
-        input_frame = tk.Frame(top_frame, bg="#F7F9FC")
-        input_frame.pack(side="left", padx=6, anchor="n")
-        input_frame.grid_columnconfigure(1, weight=1)
+        teacher_column = tk.Frame(top_frame, bg="#F7F9FC")
+        teacher_column.pack(side="left", anchor="n")
 
-        tk.Label(input_frame, text="Teacher:", bg="#F7F9FC", font=("Segoe UI", 12)).grid(row=0, column=0, sticky="w")
-        self.teacher_entry = tk.Entry(input_frame, width=26, font=("Segoe UI", 12))
-        self.teacher_entry.grid(row=0, column=1, pady=5, sticky="ew")
+        tk.Label(teacher_column, text="Teacher:", bg="#F7F9FC", font=("Segoe UI", 12)).pack(side="left", padx=(8, 0))
+        self.teacher_entry = tk.Entry(teacher_column, width=20, font=("Segoe UI", 12))
+        self.teacher_entry.pack(side="left", padx=(6, 0))
 
-        self.open_file_btn = ttk.Button(input_frame, text="Open File", style="Rounded.TButton", command=self.open_file)
-        self.open_file_btn.grid(row=1, column=1, sticky="w", pady=(4, 0))
+        self.open_file_btn = ttk.Button(top_frame, text="Open File", style="Rounded.TButton", command=self.open_file)
+        self.open_file_btn.pack(side="left", anchor="n", padx=(12, 10))
 
-        toggle_style = ttk.Style()
-        toggle_style.configure("Mode.TCheckbutton", background="#F7F9FC")
-        toggle_style.map("Mode.TCheckbutton", background=[("active", "#F7F9FC")])
-        self.advanced_toggle = ttk.Checkbutton(
-            input_frame,
-            text="Advanced Mode",
-            style="Mode.TCheckbutton",
-            variable=self.advanced_enabled,
-            command=self.on_advanced_toggle
-        )
-        self.advanced_toggle.grid(row=1, column=1, sticky="e", pady=(4, 0))
-        self.advanced_toggle.config(state="disabled")
+        self.selection_container = tk.Frame(top_frame, bg="#F7F9FC")
+        self.selection_container.pack(side="left", anchor="n")
 
-        selection_frame = tk.Frame(top_frame, bg="#F7F9FC")
-        selection_frame.pack(side="left", padx=6, anchor="n")
+        header_frame = tk.Frame(self.selection_container, bg="#F7F9FC")
+        header_frame.pack(fill="x")
 
-        self.download_btn = ttk.Button(selection_frame, text="Create PDF", style="Rounded.TButton", command=self.save_pdf)
-        self.download_btn.pack(side="right", padx=(20, 10))
-        self.download_btn.config(state="disabled")
+        self.mode_buttons = []
+        for value, text in (("quick", "Quick"), ("advanced", "Advanced")):
+            btn = tk.Radiobutton(
+                header_frame,
+                text=text,
+                variable=self.selection_mode,
+                value=value,
+                command=self.on_selection_mode_change,
+                bg="#F7F9FC",
+                activebackground="#F7F9FC",
+                font=("Segoe UI", 10, "bold") if value == "quick" else ("Segoe UI", 10),
+                indicatoron=False,
+                relief="ridge",
+                bd=1,
+                padx=8,
+                pady=2,
+            )
+            btn.pack(side="left", padx=(0, 6))
+            self.mode_buttons.append(btn)
 
-        self.quick_frame = tk.LabelFrame(selection_frame, text="Quick Selection", bg="#F7F9FC", font=("Segoe UI", 11, "bold"))
-        self.advanced_frame = tk.LabelFrame(selection_frame, text="Advanced Selection", bg="#F7F9FC", font=("Segoe UI", 11, "bold"))
+        self.selection_body = tk.Frame(self.selection_container, bd=2, relief="groove", bg="#FFFFFF")
+        self.selection_body.pack(fill="both", expand=True, pady=(2, 0))
+
+        self.quick_content = tk.Frame(self.selection_body, bg="#F7F9FC")
+        self.advanced_content = tk.Frame(self.selection_body, bg="#F7F9FC")
 
         quick_button_specs = [("eval1", "1st Eval"), ("eval2", "2nd Eval")]
         for value, text in quick_button_specs:
             btn = tk.Radiobutton(
-                self.quick_frame,
+                self.quick_content,
                 text=text,
                 variable=self.quick_selection_var,
                 value=value,
@@ -537,15 +552,28 @@ class ReportApp:
                 font=("Segoe UI", 10),
                 anchor="w"
             )
-            btn.pack(anchor="w", padx=8, pady=2)
+            btn.pack(anchor="w", padx=6, pady=1)
             btn.configure(highlightthickness=0)
             self.quick_buttons.append(btn)
 
-        self.show_quick_frame()
+        pdf_style = ttk.Style()
+        pdf_style.configure("Pdf.TButton", font=("Segoe UI", 11, "bold"), padding=(18, 12),
+                            background=DEFAULT_HEADER_COLOR, foreground="#ffffff")
+        pdf_style.map("Pdf.TButton",
+                      background=[("active", "#354d67"), ("pressed", "#1f3041")],
+                      relief=[("pressed", "sunken")])
+
+        self.download_btn = ttk.Button(top_frame, text="Create PDF", style="Pdf.TButton", command=self.save_pdf)
+        self.download_btn.pack(side="left", anchor="n", padx=(12, 0))
+        self.download_btn.config(state="disabled")
+
+        self.render_selection_body()
+        self.update_mode_button_styles()
+        if self.mode_buttons:
+            self.mode_buttons[1].configure(state="disabled")
 
         self.teacher_entry.bind("<KeyRelease>", lambda e: self.check_pdf_button())
         self.set_quick_controls_enabled(False)
-        self.set_advanced_controls_enabled(False)
 
         self.table_frame = tk.Frame(root, bg="#F7F9FC")
         self.table_frame.pack(fill="both", expand=True, padx=8, pady=(4, 6))
@@ -587,11 +615,10 @@ class ReportApp:
         try:
             df = read_flexible_excel(file_path)
             self.report_type = detect_report_type(df)
-            self.full_df = df  # Store for reuse
+            self.full_df = df
             self.course_hint = derive_course_name(df)
             units = [str(unit).strip() for unit in df['Unit'].dropna().unique() if str(unit).strip().startswith("Unit")]
             units = sorted(set(units), key=natural_unit_sort_key)
-            self.advanced_toggle.config(state="normal")
 
             if not units:
                 messagebox.showwarning("No Units Found", "No valid units were found in this Excel file.")
@@ -604,9 +631,9 @@ class ReportApp:
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-
     def configure_selection_controls(self):
         self.quick_groups = self.build_quick_groups(self.units_sorted, self.course_hint)
+        has_quick = bool(self.quick_groups.get("eval1") or self.quick_groups.get("eval2"))
         if self.quick_groups.get("eval1"):
             self.quick_selection_var.set("eval1")
         elif self.quick_groups.get("eval2"):
@@ -615,13 +642,12 @@ class ReportApp:
             self.quick_selection_var.set("eval1")
         self.refresh_quick_buttons()
         self.build_advanced_checkboxes(self.units_sorted)
-        self.advanced_enabled.set(False)
-        self.set_quick_controls_enabled(True)
-        self.set_advanced_controls_enabled(False)
-        self.show_quick_frame()
+        self.selection_mode.set("quick" if has_quick else "advanced")
+        self.set_quick_controls_enabled(has_quick)
+        self.render_selection_body()
+        self.update_mode_button_styles()
 
     def build_quick_groups(self, units, course_name):
-        """Select quick-evaluation unit groups based on the course suffix when available."""
         base_groups = self.build_even_split_groups(units)
         if not course_name:
             return base_groups
@@ -667,75 +693,68 @@ class ReportApp:
             btn.configure(state="normal" if has_units else "disabled")
 
     def set_quick_controls_enabled(self, enabled):
-        if not enabled:
+        if enabled:
+            self.refresh_quick_buttons()
+        else:
             for btn in self.quick_buttons:
                 btn.configure(state="disabled")
-        else:
-            self.refresh_quick_buttons()
-
-    def show_quick_frame(self):
-        if self.advanced_frame.winfo_manager():
-            self.advanced_frame.pack_forget()
-        if not self.quick_frame.winfo_manager():
-            self.quick_frame.pack(side="left", padx=(0, 10))
-
-    def show_advanced_frame(self):
-        if self.quick_frame.winfo_manager():
-            self.quick_frame.pack_forget()
-        if not self.advanced_frame.winfo_manager():
-            self.advanced_frame.pack(side="left", padx=(0, 10))
+        quick_header_state = "normal" if enabled else "disabled"
+        if self.mode_buttons:
+            self.mode_buttons[0].configure(state=quick_header_state)
 
     def build_advanced_checkboxes(self, units):
-        for child in self.advanced_frame.winfo_children():
+        for child in self.advanced_content.winfo_children():
             child.destroy()
         self.unit_vars = {}
         self.unit_checkbuttons = {}
         if not units:
-            tk.Label(self.advanced_frame, text="No units available", bg="#F7F9FC", font=("Segoe UI", 10)).pack(anchor="w", padx=8, pady=2)
+            tk.Label(self.advanced_content, text="No units available", bg="#F7F9FC", font=("Segoe UI", 11)).pack(anchor="w", padx=8, pady=2)
             return
         for index, unit in enumerate(units):
             var = tk.BooleanVar(value=index == 0)
             chk = tk.Checkbutton(
-                self.advanced_frame,
+                self.advanced_content,
                 text=unit,
                 variable=var,
                 command=lambda u=unit: self.on_unit_checkbox_change(u),
                 bg="#F7F9FC",
                 activebackground="#F7F9FC",
-                font=("Segoe UI", 10),
+                font=("Segoe UI", 8),
                 anchor="w"
             )
             chk.pack(anchor="w", padx=8, pady=2)
-            chk.configure(state="disabled", highlightthickness=0)
+            chk.configure(highlightthickness=0)
             self.unit_vars[unit] = var
             self.unit_checkbuttons[unit] = chk
+        has_advanced = bool(self.unit_vars)
+        self.mode_buttons[1].configure(state="normal" if has_advanced else "disabled")
+        if self.selection_mode.get() == "advanced" and not has_advanced:
+            self.selection_mode.set("quick")
+        self.render_selection_body()
+        self.update_mode_button_styles()
 
-    def set_advanced_controls_enabled(self, enabled):
-        state = "normal" if enabled else "disabled"
-        for chk in self.unit_checkbuttons.values():
-            chk.configure(state=state)
+    def is_advanced_mode(self):
+        return self.selection_mode.get() == "advanced"
 
     def on_quick_selection(self):
-        if self.advanced_enabled.get():
+        if self.is_advanced_mode():
             return
         self.update_table_by_selection()
 
-    def on_advanced_toggle(self):
-        enabled = self.advanced_enabled.get()
-        self.set_quick_controls_enabled(not enabled)
-        self.set_advanced_controls_enabled(enabled)
-        if enabled:
-            self.show_advanced_frame()
-        else:
-            self.show_quick_frame()
-        if enabled and self.unit_vars:
-            if not any(var.get() for var in self.unit_vars.values()):
-                first_unit = next(iter(self.unit_vars))
-                self.unit_vars[first_unit].set(True)
+    def on_selection_mode_change(self):
+        advanced = self.is_advanced_mode()
+        if advanced and not self.unit_vars:
+            self.selection_mode.set("quick")
+            advanced = False
+        self.render_selection_body()
+        self.update_mode_button_styles()
+        if advanced and self.unit_vars and not any(var.get() for var in self.unit_vars.values()):
+            first_unit = next(iter(self.unit_vars))
+            self.unit_vars[first_unit].set(True)
         self.update_table_by_selection()
 
     def on_unit_checkbox_change(self, unit):
-        if not self.advanced_enabled.get():
+        if not self.is_advanced_mode():
             return
         if unit not in self.unit_vars:
             return
@@ -747,12 +766,12 @@ class ReportApp:
         self.update_table_by_selection()
 
     def get_current_units(self):
-        if self.advanced_enabled.get():
+        if self.is_advanced_mode():
             return [unit for unit, var in self.unit_vars.items() if var.get()]
         return self.quick_groups.get(self.quick_selection_var.get(), [])
 
     def get_selection_label(self, units):
-        if self.advanced_enabled.get():
+        if self.is_advanced_mode():
             unit_list = ", ".join(units) if units else "None"
             return f"Advanced ({unit_list})"
         label = "1st Eval" if self.quick_selection_var.get() == "eval1" else "2nd Eval"
@@ -764,7 +783,7 @@ class ReportApp:
         if self.full_df is None or self.report_type is None:
             return
         selected_units = self.get_current_units()
-        if not selected_units and not self.advanced_enabled.get():
+        if not selected_units and not self.is_advanced_mode():
             for key in ("eval1", "eval2"):
                 fallback_units = self.quick_groups.get(key, [])
                 if fallback_units:
@@ -772,6 +791,8 @@ class ReportApp:
                     selected_units = fallback_units
                     break
         self.current_units_label = self.get_selection_label(selected_units)
+        if self.full_df is not None:
+            self.course_hint = derive_course_name(self.full_df)
         if self.report_type == "Assignment":
             self.df_internal, self.course, self.assignment_styler = process_assignment(self.full_df, selected_units, skip_read=True)
         else:
@@ -931,7 +952,6 @@ class ReportApp:
 
     def on_row_enter(self, event, index):
         if self.selection_active and self.selection_anchor is not None and event.state & 0x0100:
-            # 0x0100 corresponds to the left mouse button being pressed
             self.on_row_drag(event, index)
 
     def on_row_release(self, event):
@@ -977,8 +997,33 @@ class ReportApp:
         filepath = filedialog.asksaveasfilename(defaultextension=".pdf", initialfile=filename,
                                                 filetypes=[("PDF files", "*.pdf")])
         if filepath:
-            export_pdf(self.df_internal if self.df_internal is not None else self.df_filtered, filepath, teacher, course, unit_label)
+            export_pdf(
+                self.df_internal if self.df_internal is not None else self.df_filtered,
+                filepath,
+                teacher,
+                course,
+                self.course_hint,
+                unit_label,
+            )
             messagebox.showinfo("Export Complete", f"PDF saved to:\n{filepath}")
+
+    def render_selection_body(self):
+        self.quick_content.pack_forget()
+        self.advanced_content.pack_forget()
+        if self.is_advanced_mode():
+            if not self.advanced_content.winfo_children():
+                tk.Label(self.advanced_content, text="No units available", bg="#F7F9FC", font=("Segoe UI", 10)).pack(anchor="w", padx=8, pady=2)
+            self.advanced_content.pack(fill="both", expand=True)
+        else:
+            self.quick_content.pack(fill="both", expand=True)
+
+    def update_mode_button_styles(self):
+        current = self.selection_mode.get()
+        for btn in self.mode_buttons:
+            value = btn.cget("value")
+            font = ("Segoe UI", 8, "bold") if value == current else ("Segoe UI", 8)
+            relief = "sunken" if value == current else "ridge"
+            btn.configure(font=font, relief=relief)
 
 if __name__ == "__main__":
     root = tk.Tk()
