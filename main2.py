@@ -37,32 +37,63 @@ COLUMN_ROW_COLORS = {
 DEFAULT_ROW_COLORS = ("#FFFFFF", "#F7FAFC")
 SELECTION_OUTLINE = "#4A90E2"
 
+
 def extract_class_info(class_string):
     try:
-        parts = class_string.strip().split("_")
-
+        parts = str(class_string).strip().split("_")
         if len(parts) < 4:
-            return {"bimester": "Unknown", "branch": "Unknown", "course": "Unknown", "schedule": "Unknown"}
+            return {
+                "bimester": "Unknown",
+                "branch": "Unknown",
+                "course": "Unknown",
+                "schedule": "Unknown",
+            }
 
-        bimester_raw = parts[0]
-        bimester = bimester_raw[-2:]
-        branch = parts[1]
-        course = parts[2]
-        schedule = parts[3]
+        bimester_raw = parts[0].strip()
+        bimester = bimester_raw[-2:] if bimester_raw else "Unknown"
+        branch = parts[1].strip() or "Unknown"
+        course_block = parts[2].strip()
+        schedule_block = parts[3].strip()
+
+        course_match = re.search(r"(SPS\s*\d+\s*-\s*\d+)", course_block)
+        course = course_block
+        prefix_extra = ""
+        if course_match:
+            course_raw = course_match.group(1)
+            course = re.sub(r"\s*-\s*", "-", course_raw)
+            course = re.sub(r"\s+", " ", course).strip()
+            prefix_extra = course_block[course_match.end():].strip()
+        else:
+            course = course_block.strip() or "Unknown"
+
+        prefix_extra = re.sub(r"\s+", " ", prefix_extra).strip()
+        schedule_parts = []
+        if prefix_extra:
+            schedule_parts.append(prefix_extra.replace(" ", ""))
+        if schedule_block:
+            schedule_parts.append(schedule_block)
+        schedule = "_".join(schedule_parts) if schedule_parts else "Unknown"
 
         return {
-            "bimester": bimester,
-            "branch": branch,
-            "course": course,
-            "schedule": schedule
+            "bimester": bimester or "Unknown",
+            "branch": branch or "Unknown",
+            "course": course or "Unknown",
+            "schedule": schedule or "Unknown",
         }
 
     except Exception:
-        return {"bimester": "Unknown", "branch": "Unknown", "course": "Unknown", "schedule": "Unknown"}
+        return {
+            "bimester": "Unknown",
+            "branch": "Unknown",
+            "course": "Unknown",
+            "schedule": "Unknown",
+        }
+
 
 def clean_student_name(raw):
     match = re.search(r"\((.*?)\)", str(raw))
     return match.group(1) if match else str(raw).strip()
+
 
 def extract_score(text):
     match = re.match(r"(\d+)/(\d+)", str(text))
@@ -73,11 +104,15 @@ def extract_score(text):
         return int(match.group(1)), 100
     return 0, 0
 
+
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', '', str(name))
+
+
 def hex_to_rgb(hex_color):
     hex_color = hex_color.lstrip('#')
     return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+
 
 def read_flexible_excel(file_path):
     try:
@@ -87,6 +122,7 @@ def read_flexible_excel(file_path):
     except Exception as e:
         raise ValueError(f"Could not read the file. Details:\n{str(e)}")
 
+
 def detect_report_type(df):
     if "Category" in df.columns:
         return "Test"
@@ -94,6 +130,7 @@ def detect_report_type(df):
         return "Assignment"
     else:
         raise ValueError("Unknown report format. Make sure your Excel has the correct structure.")
+
 
 def natural_unit_sort_key(unit_label):
     match = re.search(r"(\d+)", unit_label or "")
@@ -127,20 +164,13 @@ def derive_course_name(df):
     return str(class_series.iloc[0]).strip()
 
 
-def extract_course_tail(class_string):
-    if not class_string:
-        return "Unknown"
-    text = str(class_string).strip()
-    match = re.search(r"SPS\s*\d\s*-\s*\d", text)
-    if match:
-        tail = text[match.end():].lstrip(" _")
-        if tail:
-            return tail
-    if "_" in text:
-        return text.split("_")[-1].strip() or "Unknown"
-    return text or "Unknown"
-
 def style_assignment_table(df):
+    """Return a pandas Styler configured with the academic table design.
+
+    The styling complies with the requested palette, typography, alternating
+    rows, hover colour, and subtle skill-based accent lines while keeping the
+    table printer-friendly and compatible with downstream exports.
+    """
     base_font = '"Inter", "Lato", "Segoe UI", sans-serif'
     accent_map = {**HEADER_COLOR_MAP, "Total": "#D18DF0"}
 
@@ -250,7 +280,8 @@ def process_assignment(file_path_or_df, selected_units, skip_read=False):
     all_students = sorted(df['Student'].unique())
     skills = ['Listening', 'Grammar', 'Vocabulary', 'Reading']
     course_source = df['Class'].iloc[0].strip() if 'Class' in df.columns else ""
-    course = extract_course_tail(course_source)
+    course_info = extract_class_info(course_source)
+    course = course_info["course"]
 
     df_filtered = df[df['Unit'].isin(selected_units)].copy()
     grouped = df_filtered.groupby(['Student', 'Content']).agg({'Earned': 'sum', 'Total': 'sum'}).reset_index()
@@ -313,6 +344,7 @@ def process_assignment(file_path_or_df, selected_units, skip_read=False):
 
     return df_results, course, styled
 
+
 def process_test(file_path_or_df, selected_units, skip_read=False):
     df = file_path_or_df if skip_read else read_flexible_excel(file_path_or_df)
     df['Student'] = df['Student'].apply(clean_student_name)
@@ -320,7 +352,8 @@ def process_test(file_path_or_df, selected_units, skip_read=False):
     df_all = df[['Student', 'Score', 'Unit', 'Class']]
 
     raw_course = df['Class'].dropna().astype(str).str.strip().iloc[0] if 'Class' in df.columns and not df['Class'].dropna().empty else ""
-    course = extract_course_tail(raw_course)
+    course_info = extract_class_info(raw_course)
+    course = course_info["course"]
 
     all_students = sorted(df_all['Student'].unique())
     selected_units_sorted = sorted(selected_units, key=natural_unit_sort_key)
@@ -344,6 +377,7 @@ def process_test(file_path_or_df, selected_units, skip_read=False):
         df_results = pd.DataFrame(columns=[STUDENT_COLUMN] + [label for _, label in unit_columns])
 
     return df_results, course
+
 
 def try_configure_roboto(pdf: FPDF) -> str:
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -373,7 +407,7 @@ def export_pdf(df, path, teacher, course_display, class_string, selected_units_l
 
     label_width = 30
     value_width = 80
-    gap = 36
+    gap = 36  # space between the two columns
 
     for i in range(3):
         pdf.set_font(font_family, style='B', size=11)
@@ -457,6 +491,7 @@ def export_pdf(df, path, teacher, course_display, class_string, selected_units_l
     pdf.set_text_color(0, 0, 0)
     pdf.output(path)
 
+
 class ReportApp:
     def __init__(self, root):
         self.root = root
@@ -500,8 +535,8 @@ class ReportApp:
         teacher_column = tk.Frame(top_frame, bg="#F7F9FC")
         teacher_column.pack(side="left", anchor="n")
 
-        tk.Label(teacher_column, text="Teacher:", bg="#F7F9FC", font=("Segoe UI", 12)).pack(side="left", padx=(8, 0))
-        self.teacher_entry = tk.Entry(teacher_column, width=20, font=("Segoe UI", 12))
+        tk.Label(teacher_column, text="Teacher:", bg="#F7F9FC", font=("Segoe UI", 12)).pack(side="left")
+        self.teacher_entry = tk.Entry(teacher_column, width=26, font=("Segoe UI", 12))
         self.teacher_entry.pack(side="left", padx=(6, 0))
 
         self.open_file_btn = ttk.Button(top_frame, text="Open File", style="Rounded.TButton", command=self.open_file)
@@ -549,7 +584,7 @@ class ReportApp:
                 command=self.on_quick_selection,
                 bg="#F7F9FC",
                 activebackground="#F7F9FC",
-                font=("Segoe UI", 10),
+                font=("Segoe UI", 11),
                 anchor="w"
             )
             btn.pack(anchor="w", padx=6, pady=1)
@@ -719,7 +754,7 @@ class ReportApp:
                 command=lambda u=unit: self.on_unit_checkbox_change(u),
                 bg="#F7F9FC",
                 activebackground="#F7F9FC",
-                font=("Segoe UI", 8),
+                font=("Segoe UI", 11),
                 anchor="w"
             )
             chk.pack(anchor="w", padx=8, pady=2)
@@ -1012,7 +1047,7 @@ class ReportApp:
         self.advanced_content.pack_forget()
         if self.is_advanced_mode():
             if not self.advanced_content.winfo_children():
-                tk.Label(self.advanced_content, text="No units available", bg="#F7F9FC", font=("Segoe UI", 10)).pack(anchor="w", padx=8, pady=2)
+                tk.Label(self.advanced_content, text="No units available", bg="#F7F9FC", font=("Segoe UI", 11)).pack(anchor="w", padx=8, pady=2)
             self.advanced_content.pack(fill="both", expand=True)
         else:
             self.quick_content.pack(fill="both", expand=True)
@@ -1021,9 +1056,10 @@ class ReportApp:
         current = self.selection_mode.get()
         for btn in self.mode_buttons:
             value = btn.cget("value")
-            font = ("Segoe UI", 8, "bold") if value == current else ("Segoe UI", 8)
+            font = ("Segoe UI", 10, "bold") if value == current else ("Segoe UI", 10)
             relief = "sunken" if value == current else "ridge"
             btn.configure(font=font, relief=relief)
+
 
 if __name__ == "__main__":
     root = tk.Tk()
