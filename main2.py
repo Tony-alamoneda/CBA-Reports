@@ -602,6 +602,32 @@ class ReportApp:
         self.download_btn.pack(side="left", anchor="n", padx=(12, 0))
         self.download_btn.config(state="disabled")
 
+        # Style for the CSV export button (slightly different color)
+        csv_style = ttk.Style()
+        csv_style.configure(
+            "Csv.TButton",
+            font=("Segoe UI", 11, "bold"),
+            padding=(18, 12),
+            background="#1B9E77",     # green-ish tone
+            foreground="#ffffff"
+        )
+        csv_style.map(
+            "Csv.TButton",
+            background=[("active", "#147558"), ("pressed", "#0E4C3A")],
+            relief=[("pressed", "sunken")]
+        )
+
+        # New button: Export CSV
+        self.csv_btn = ttk.Button(
+            top_frame,
+            text="Export CSV",
+            style="Csv.TButton",
+            command=self.save_csv
+        )
+        self.csv_btn.pack(side="left", anchor="n", padx=(8, 0))
+        self.csv_btn.config(state="disabled")
+
+
         self.render_selection_body()
         self.update_mode_button_styles()
         if self.mode_buttons:
@@ -637,10 +663,17 @@ class ReportApp:
                   relief=[("pressed", "sunken")])
 
     def check_pdf_button(self):
-        if self.df_filtered is not None and self.teacher_entry.get().strip():
+        has_data = self.df_filtered is not None
+        has_teacher = bool(self.teacher_entry.get().strip())
+
+        # Both exports require data + teacher name
+        if has_data and has_teacher:
             self.download_btn.config(state="normal")
+            self.csv_btn.config(state="normal")
         else:
             self.download_btn.config(state="disabled")
+            self.csv_btn.config(state="disabled")
+
 
     def open_file(self):
         file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xls *.xlsx")])
@@ -1041,6 +1074,40 @@ class ReportApp:
                 unit_label,
             )
             messagebox.showinfo("Export Complete", f"PDF saved to:\n{filepath}")
+
+    def save_csv(self):
+        """Export the current results table to a CSV file."""
+        if self.df_filtered is None:
+            messagebox.showerror("Error", "No data to export.")
+            return
+
+        # Use teacher name if available; otherwise fall back to a generic label
+        teacher = self.teacher_entry.get().strip() or "Teacher"
+        course = self.course if self.course else "Unknown"
+        unit_label = self.current_units_label or "Units"
+
+        filename = f"{sanitize_filename(teacher)} - {sanitize_filename(course)} - {sanitize_filename(unit_label)}.csv"
+
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            initialfile=filename,
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+
+        if not filepath:
+            return
+
+        try:
+            # Use the same internal DataFrame used for PDF export
+            df_to_export = self.df_internal if self.df_internal is not None else self.df_filtered
+
+            # Export as UTF-8 with BOM so Excel opens it nicely (especially with accents)
+            df_to_export.to_csv(filepath, index=False, encoding="utf-8-sig")
+
+            messagebox.showinfo("Export Complete", f"CSV saved to:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not save CSV:\n{e}")
+
 
     def render_selection_body(self):
         self.quick_content.pack_forget()
