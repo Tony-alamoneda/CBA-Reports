@@ -115,12 +115,86 @@ def hex_to_rgb(hex_color):
 
 
 def read_flexible_excel(file_path):
-    try:
-        df = pd.read_html(file_path)[0]
+    """Read Surpass exports from either the original download or Google Sheets.
+
+    We try HTML, Excel, and CSV loaders in succession so both the native
+    Surpass export (often an HTML table inside an `.xls`) and Google Sheets
+    re-exports are supported automatically. Column names are normalised to
+    strings, stripped of whitespace, and canonicalised (e.g., ``Result (Date
+    Submitted)`` → ``Result (DateSubmitted)``) to match downstream logic.
+    """
+
+    def _normalize_columns(df):
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [
+                " ".join(str(part) for part in col if str(part).strip())
+                for col in df.columns
+            ]
+        else:
+            df.columns = df.columns.astype(str)
         df.columns = df.columns.str.strip()
         return df
-    except Exception as e:
-        raise ValueError(f"Could not read the file. Details:\n{str(e)}")
+
+    def _canonicalize_columns(df):
+        """Rename common Surpass headers to their canonical spelling.
+
+        Google Sheets downloads may inject spaces within parentheses or change
+        casing; this helper aligns those variants so downstream lookups remain
+        stable. We intentionally match loosely on any header that contains the
+        tokens "result", "date", and "submit" to catch variants like
+        "Result ( Date Submitted )", "Result - date submitted", or
+        "result_dateSubmitted".
+        """
+
+        def key(name: str) -> str:
+            return re.sub(r"\W+", "", name).lower()
+
+        def is_result_column(name: str) -> bool:
+            norm = key(name)
+            return "result" in norm and "date" in norm and "submit" in norm
+
+        rename_map = {}
+        for col in df.columns:
+            if is_result_column(col):
+                rename_map[col] = "Result (DateSubmitted)"
+
+        if rename_map:
+            df = df.rename(columns=rename_map)
+        return df
+
+    errors = []
+
+    def _attempt(loader_name, loader_fn):
+        try:
+            df_local = loader_fn()
+            df_local = _normalize_columns(df_local)
+            return _canonicalize_columns(df_local)
+        except Exception as exc:  # pragma: no cover - best-effort fallbacks
+            errors.append(f"{loader_name}: {exc}")
+            return None
+
+    # 1) HTML first (many native Surpass `.xls` files are HTML tables)
+    html_tables = _attempt("HTML", lambda: pd.read_html(file_path)[0])
+    if html_tables is not None:
+        return html_tables
+
+    # 2) Excel engines (covers genuine Excel files, including Sheets exports)
+    for engine in (None, "openpyxl", "xlrd"):
+        excel_df = _attempt(f"Excel ({engine or 'auto'})", lambda eng=engine: pd.read_excel(file_path, engine=eng))
+        if excel_df is not None:
+            return excel_df
+
+    # 3) CSV fallbacks (in case the file is saved as CSV or mislabelled)
+    for csv_kwargs in ({}, {"sep": None, "engine": "python"}):
+        csv_df = _attempt(f"CSV ({csv_kwargs or 'default'})", lambda opts=csv_kwargs: pd.read_csv(file_path, **opts))
+        if csv_df is not None:
+            return csv_df
+
+    error_detail = "\n".join(errors)
+    raise ValueError(
+        "Could not read the file. Supported formats: Excel (.xls/.xlsx), CSV, or HTML. "
+        f"Details:\n{error_detail}"
+    )
 
 
 def detect_report_type(df):
@@ -275,6 +349,11 @@ def style_assignment_table(df):
 
 def process_assignment(file_path_or_df, selected_units, skip_read=False):
     df = file_path_or_df if skip_read else read_flexible_excel(file_path_or_df)
+    if 'Result (DateSubmitted)' not in df.columns:
+        raise ValueError(
+            "The file is missing the 'Result (DateSubmitted)' column. If you downloaded the file "
+            "from Google Sheets, export it as Excel/CSV without altering the header names and try again."
+        )
     df['Student'] = df['Student'].apply(clean_student_name)
     df[['Earned', 'Total']] = df['Result (DateSubmitted)'].apply(lambda x: pd.Series(extract_score(x)))
     all_students = sorted(df['Student'].unique())
@@ -347,6 +426,11 @@ def process_assignment(file_path_or_df, selected_units, skip_read=False):
 
 def process_test(file_path_or_df, selected_units, skip_read=False):
     df = file_path_or_df if skip_read else read_flexible_excel(file_path_or_df)
+    if 'Result (DateSubmitted)' not in df.columns:
+        raise ValueError(
+            "The file is missing the 'Result (DateSubmitted)' column. If you downloaded the file "
+            "from Google Sheets, export it as Excel/CSV without altering the header names and try again."
+        )
     df['Student'] = df['Student'].apply(clean_student_name)
     df['Score'] = df['Result (DateSubmitted)'].apply(lambda x: extract_score(x)[0])
     df_all = df[['Student', 'Score', 'Unit', 'Class']]
@@ -598,7 +682,7 @@ class ReportApp:
                       background=[("active", "#354d67"), ("pressed", "#1f3041")],
                       relief=[("pressed", "sunken")])
 
-        self.download_btn = ttk.Button(top_frame, text="Create PDF", style="Pdf.TButton", command=self.save_pdf)
+        self.download_btn = ttk.Button(top_frame, text="Export PDF", style="Pdf.TButton", command=self.save_pdf)
         self.download_btn.pack(side="left", anchor="n", padx=(12, 0))
         self.download_btn.config(state="disabled")
 
@@ -626,7 +710,6 @@ class ReportApp:
         )
         self.csv_btn.pack(side="left", anchor="n", padx=(8, 0))
         self.csv_btn.config(state="disabled")
-
 
         self.render_selection_body()
         self.update_mode_button_styles()
@@ -674,9 +757,13 @@ class ReportApp:
             self.download_btn.config(state="disabled")
             self.csv_btn.config(state="disabled")
 
-
     def open_file(self):
-        file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xls *.xlsx")])
+        file_path = filedialog.askopenfilename(
+            filetypes=[
+                ("Excel/CSV/HTML", "*.xls *.xlsx *.csv *.html"),
+                ("All files", "*.*"),
+            ]
+        )
         if not file_path:
             return
 
@@ -685,6 +772,28 @@ class ReportApp:
             self.report_type = detect_report_type(df)
             self.full_df = df
             self.course_hint = derive_course_name(df)
+
+            class_series = pd.Series(dtype=str)
+            if 'Class' in df.columns:
+                class_series = df['Class'].dropna().astype(str).str.strip()
+
+            class_infos = [extract_class_info(value) for value in class_series if value]
+            required_keys = ("bimester", "branch", "course", "schedule")
+            missing_class_info = (
+                not class_infos
+                or all(any(info.get(key) == "Unknown" for key in required_keys) for info in class_infos)
+            )
+
+            if missing_class_info:
+                messagebox.showwarning(
+                    "Incomplete Class Information",
+                    (
+                        "It seems that this course wasn't created with the official code provided by the TC. "
+                        "Please make sure your course was created with the correct code or copy the code to the "
+                        "Class column of the downloaded Surpass excel file and retry. If not solved, the report "
+                        "will not have the necessary information."
+                    ),
+                )
             units = [str(unit).strip() for unit in df['Unit'].dropna().unique() if str(unit).strip().startswith("Unit")]
             units = sorted(set(units), key=natural_unit_sort_key)
 
@@ -1107,7 +1216,6 @@ class ReportApp:
             messagebox.showinfo("Export Complete", f"CSV saved to:\n{filepath}")
         except Exception as e:
             messagebox.showerror("Error", f"Could not save CSV:\n{e}")
-
 
     def render_selection_body(self):
         self.quick_content.pack_forget()
