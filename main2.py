@@ -36,6 +36,7 @@ COLUMN_ROW_COLORS = {
 }
 DEFAULT_ROW_COLORS = ("#FFFFFF", "#F7FAFC")
 SELECTION_OUTLINE = "#4A90E2"
+SELECTION_FILL = "#DCEAFF"
 
 
 def extract_class_info(class_string):
@@ -595,6 +596,7 @@ class ReportApp:
         self.table_canvas = None
         self.table_inner = None
         self.table_rows = []
+        self.row_widgets = {}
         self.selected_row_indices = set()
         self.selection_anchor = None
         self.selection_active = False
@@ -846,13 +848,9 @@ class ReportApp:
         mapped_groups = {}
         for key in ("eval1", "eval2"):
             required_units = config.get(key, [])
-            if required_units and all(unit in available for unit in required_units):
-                mapped_groups[key] = list(required_units)
-            else:
-                mapped_groups[key] = []
+            mapped_units = [unit for unit in required_units if unit in available]
+            mapped_groups[key] = mapped_units
 
-        if not mapped_groups["eval1"] and not mapped_groups["eval2"]:
-            return base_groups
         return mapped_groups
 
     def build_even_split_groups(self, units):
@@ -985,6 +983,7 @@ class ReportApp:
             widget.destroy()
 
         self.table_rows = []
+        self.row_widgets = {}
         self.selected_row_indices.clear()
         self.selection_anchor = None
         self.selection_active = False
@@ -1045,7 +1044,8 @@ class ReportApp:
             label.grid(row=0, column=col_index, sticky="nsew", padx=(0 if col_index == 0 else 1), pady=0)
 
         for row_index, row in enumerate(df.itertuples(index=False), start=1):
-            cell_widgets = []
+            r_key = row_index - 1
+            self.row_widgets[r_key] = []
             for col_index, (col, value) in enumerate(zip(columns, row)):
                 if col == STUDENT_COLUMN:
                     palette = DEFAULT_ROW_COLORS
@@ -1067,12 +1067,13 @@ class ReportApp:
                     anchor=anchor,
                 )
                 cell.grid(row=row_index, column=col_index, sticky="nsew", padx=(0 if col_index == 0 else 1), pady=(0, 1))
-                cell.bind("<Button-1>", lambda e, idx=row_index - 1: self.on_row_press(e, idx))
-                cell.bind("<B1-Motion>", lambda e, idx=row_index - 1: self.on_row_drag(e, idx))
-                cell.bind("<Enter>", lambda e, idx=row_index - 1: self.on_row_enter(e, idx))
+
+                cell.bind("<ButtonPress-1>", lambda e, r=r_key: self.on_row_press(e, r))
+                cell.bind("<B1-Motion>", lambda e, r=r_key: self.on_row_drag(e, r))
+                cell.bind("<Enter>", lambda e, r=r_key: self.on_row_enter(e, r))
                 cell.bind("<ButtonRelease-1>", self.on_row_release)
-                cell_widgets.append({"widget": cell, "bg": bg_color})
-            self.table_rows.append(cell_widgets)
+
+                self.row_widgets[r_key].append({"widget": cell, "base_bg": bg_color})
 
         self.table_canvas.bind("<MouseWheel>", self._on_mousewheel)
         self.table_inner.bind("<MouseWheel>", self._on_mousewheel)
@@ -1100,15 +1101,14 @@ class ReportApp:
             self.table_canvas.yview_scroll(direction, "units")
 
     def on_row_press(self, event, index):
-        if index < 0 or index >= len(self.table_rows):
+        if index < 0:
             return
-        ctrl_pressed = bool(event.state & 0x0004)
+        ctrl_pressed = bool(event.state & (0x0004 | 0x0008))
         if ctrl_pressed:
-            if index in self.selected_row_indices:
-                new_selection = set(self.selected_row_indices)
+            new_selection = set(self.selected_row_indices)
+            if index in new_selection:
                 new_selection.remove(index)
             else:
-                new_selection = set(self.selected_row_indices)
                 new_selection.add(index)
             self._set_selected_rows(new_selection)
             self.selection_active = False
@@ -1122,32 +1122,38 @@ class ReportApp:
     def on_row_drag(self, event, index):
         if not self.selection_active or self.selection_anchor is None:
             return
-        index = max(0, min(index, len(self.table_rows) - 1))
+        index = max(0, min(index, len(self.row_widgets) - 1))
         start = min(self.selection_anchor, index)
         end = max(self.selection_anchor, index)
         self._set_selected_rows(set(range(start, end + 1)))
 
     def on_row_enter(self, event, index):
-        if self.selection_active and self.selection_anchor is not None and event.state & 0x0100:
+        if self.selection_active and self.selection_anchor is not None:
             self.on_row_drag(event, index)
 
     def on_row_release(self, event):
         self.selection_active = False
 
     def _set_selected_rows(self, indices):
-        indices = {idx for idx in indices if 0 <= idx < len(self.table_rows)}
+        indices = {idx for idx in indices if idx in self.row_widgets}
         removed = self.selected_row_indices - indices
         added = indices - self.selected_row_indices
 
         for idx in removed:
-            for cell in self.table_rows[idx]:
+            for cell in self.row_widgets.get(idx, []):
                 widget = cell["widget"]
-                widget.configure(highlightthickness=0)
+                base_bg = cell["base_bg"]
+                widget.configure(highlightthickness=0, bg=base_bg)
 
         for idx in added:
-            for cell in self.table_rows[idx]:
+            for cell in self.row_widgets.get(idx, []):
                 widget = cell["widget"]
-                widget.configure(highlightbackground=SELECTION_OUTLINE, highlightcolor=SELECTION_OUTLINE, highlightthickness=2)
+                widget.configure(
+                    highlightbackground=SELECTION_OUTLINE,
+                    highlightcolor=SELECTION_OUTLINE,
+                    highlightthickness=2,
+                    bg=SELECTION_FILL,
+                )
 
         self.selected_row_indices = indices
 
